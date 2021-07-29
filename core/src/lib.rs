@@ -9,11 +9,29 @@ use std::{
 
 use tokio::{sync::broadcast, task::JoinHandle};
 
+mod runtime;
+
 pub struct EventTarget<A> {
     sender: broadcast::Sender<A>,
 }
 
 pub struct UnlistenHandle(JoinHandle<()>);
+
+pub struct EventName<const N: u64>;
+
+impl UnlistenHandle {
+    #[inline]
+    pub fn cancel(&self) {
+        self.0.abort();
+    }
+}
+
+impl<const N: u64> EventName<N> {
+    #[inline]
+    pub fn new<const M: u64>() -> EventName<M> {
+        EventName::<M>
+    }
+}
 
 impl<A> EventTarget<A>
 where
@@ -24,12 +42,10 @@ where
         EventTarget { sender: tx }
     }
 
-
     pub fn emit(&self, args: A) {
         //忽略错误
         drop(self.sender.send(args))
     }
-
 
     pub fn listen<F>(&self, mut func: F)
     where
@@ -48,19 +64,17 @@ where
         });
     }
 
-
     pub async fn wait(&self) -> Option<A> {
         let mut rx = self.sender.subscribe();
         rx.recv().await.ok()
     }
 
-
-    pub fn listen_once<F>(&self,mut func:F)->UnlistenHandle
+    pub fn listen_once<F>(&self, mut func: F) -> UnlistenHandle
     where
-        F: FnMut(A) + Send + 'static
+        F: FnMut(A) + Send + 'static,
     {
         let mut rx = self.sender.subscribe();
-        let jh=tokio::spawn(async move {
+        let jh = tokio::spawn(async move {
             if let Ok(args) = rx.recv().await {
                 func(args);
             }
@@ -68,90 +82,33 @@ where
         UnlistenHandle(jh)
     }
 
-
     pub fn unlisten(&self, h: UnlistenHandle) {
         h.0.abort();
     }
 }
 
+pub trait EventTargetMarker {}
 
-pub trait EventTargetAttachment{
-    type Output;
-    fn event_target(&self)->&EventTarget<Self::Arg>;
+pub trait EventTargetAttachment {
+    type Output: EventTargetMarker;
+    fn event_target(&self) -> &Self::Output;
 }
 
-
-pub trait EventWithArgs<const N:u32, A>
+pub trait EventEmitter<A, const ID: u64>
 where
     A: Clone + Send + 'static,
 {
-
-    fn event_target(&self)->&EventTarget<A>;
-
-
-    #[inline]
-    fn on<F>(&self, func: F)
-    where
-        F: FnMut(A) + Send + 'static
-    {
-        self.event_target().listen(func)
-    }
-
-
-    #[inline]
-    fn off(&self, h: UnlistenHandle){
-        self.event_target().unlisten(h)
-    }
-
-
-    #[inline]
-    fn once<F>(&self, func: F)
-    where
-        F: FnMut(A) + Send + 'static
-    {
-        self.event_target().listen_once(func)
-    }
+    fn on<F: FnMut(A)>(&self, name: EventName<ID>) -> UnlistenHandle;
+    fn off(&self, handle: UnlistenHandle) -> bool;
 }
 
-
-#[macro_export]
-macro_rules! event_target{
-    {
-        struct $struct:ident;
-        enum $enum:ident;
-        $($name:ident=>$ty:ty),*
-    }=>{
-        enum $enum{
-            __ZeroStartHeadDoNotUseThis__=0u32,
-            $($name),*
-        }
-
-        struct $struct{
-            $( $name: $crate::EventTarget<$ty> ),*
-        }
-
-        impl $struct{
-            fn new()->Self{
-                $struct {
-                    $($name:$crate::EventTarget<$ty>::new()),*
-                }
-            }
-        }
-
-        $(
-            impl EventWithArgs<$enum::$name as u32,$ty> for $struct{
-                fn event_target(&self)->&$crate::EventTarget{
-                    &self.$name
-                }
-            }
-        )*
-    }
+pub trait OnceEventEmitter<A, const ID: u64>
+where
+    A: Clone + Send + 'static,
+{
+    fn once<F: FnMut(A)>(&self, name: EventName<ID>) -> UnlistenHandle;
+    fn off(&self, handle: UnlistenHandle) -> bool;
 }
-
-
-struct M<const N:u64>;
-
-
 
 #[tokio::main]
 #[test]
