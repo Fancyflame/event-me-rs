@@ -1,9 +1,13 @@
 [package]
-edition = "2018"
-name = "event-me"
+name = "event-me-macros"
 version = "0.1.0"
+edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+proc-macro=true
+
 [dependencies]
-tokio = {version = "1.8", features = ["sync", "macros", "rt-multi-thread", "time"]}
+syn="1"
+quote="1"
