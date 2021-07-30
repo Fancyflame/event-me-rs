@@ -1,49 +1,73 @@
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex
+    },
     task::Waker,
 };
 
-static mut LISTENERS_LIST: Vec<(Option<Waker>, usize)> = Vec::new();
-
-static FREE_POS_INDEX: AtomicUsize = AtomicUsize::new(NULL_INDEX); //0代表null
+static LISTENERS_LIST: Mutex<ListenersList> = Mutex::new(
+    ListenersList{
+        wakers:Vec::new(),
+        free_node:NULL_INDEX
+    }
+);
 
 const NULL_INDEX: usize = 0;
 
-pub fn alloc() -> usize {
-    let mut ind = FREE_POS_INDEX.load(Ordering::AcqRel);
 
-    if ind == NULL_INDEX {
-        unsafe {
-            LISTENERS_LIST.reserve(16);
-            LISTENERS_LIST.push((None, NULL_INDEX));
-            for x in 2..15 {
-                LISTENERS_LIST.push((None, x));
-            }
-            LISTENERS_LIST.push((None, NULL_INDEX));
-        }
-        ind = 1;
-    }
-
-    let item = LISTENERS_LIST[ind];
-    assert_eq!(item.0, None);
-
-    if item.1 == NULL_INDEX {
-        //TODO
-    }
-
-    FREE_POS_INDEX.store(item.1, Ordering::AcqRel);
-    ind
+struct ListenersList{
+    wakers:Vec<(Option<Waker>, usize)>,
+    free_node:usize
 }
 
-pub fn free(ind: usize) {
-    assert_ne!(ind, NULL_INDEX);
 
-    let mut free_pos = FREE_POS_INDEX.load(Ordering::AcqRel);
-    assert_ne!(free_pos, NULL_INDEX);
-    unsafe {
-        let item = LISTENERS_LIST[ind];
-        item.0 = None;
-        item.1 = free_pos; //指针指向上一个空位
+pub struct List{
+    start:usize
+}
+
+
+impl List{
+    pub fn request_new() -> Self{
+        let mut mutex=LISTENERS_LIST.lock();
+        let w=&mut mutex.wakers;
+        let mut index=mutex.free_node;
+
+        if index == NULL_INDEX {
+            //未初始化
+            w.reserve(16);
+            w.push((None, NULL_INDEX));
+            for x in 2..15 {
+                w.push((None, x));
+            }
+            w.push((None, NULL_INDEX));
+            index=1;
+        }
+
+        let item = w[index];
+        assert_eq!(item.0, None);
+
+        //将free_node指向下一个空闲节点
+        if item.1 == NULL_INDEX {
+            //新增位置
+            w.push((None,NULL_INDEX));
+            mutex.free_node=w.len()-1;
+        }else{
+            mutex.free_node=item.1;
+        }
+
+        NodePointer{
+            target:index
+        }
     }
-    FREE_POS_INDEX.store(ind, Ordering::AcqRel);
+}
+
+
+impl Drop for NodePointer{
+    fn drop(&mut self){
+        assert_ne!(self.target, NULL_INDEX);
+
+        let mut mutex=LISTENERS_LIST.lock();
+        mutex.waker[self.target]
+
+    }
 }
