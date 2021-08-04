@@ -60,7 +60,7 @@ impl Parse for EventRegister {
 /// event_target!{
 ///     pub struct EventTarget{
 ///         event1=>|String,u32|,
-///         event2=>once |bool|,
+///         event2=>|bool|,
 ///         event3=>||
 ///     }
 /// }

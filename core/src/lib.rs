@@ -9,6 +9,7 @@ use std::{
 
 use tokio::{sync::broadcast, task::JoinHandle};
 
+mod fastlink;
 mod runtime;
 
 pub struct EventTarget<A> {
@@ -108,21 +109,4 @@ where
 {
     fn once<F: FnMut(A)>(&self, name: EventName<ID>) -> UnlistenHandle;
     fn off(&self, handle: UnlistenHandle) -> bool;
-}
-
-#[tokio::main]
-#[test]
-async fn it_works() {
-    let et = EventTarget::<u32>::new(5);
-    let mut a = 20;
-    et.listen(move |arg| {
-        a += arg;
-        println!("{}", a);
-    });
-
-    for _ in 0..5 {
-        println!("fool");
-        et.emit(5);
-        tokio::time::sleep(Duration::from_millis(800)).await;
-    }
 }
