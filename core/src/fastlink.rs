@@ -41,14 +41,14 @@ impl<'a, T> Container<'a, T> {
     }
 
     fn alloc(&'a self) -> *mut Node<'a, T> {
-        let mut node: Option<*mut Node<'a, T>> = None;
-        let mut old = self.next_free.load(Ordering::SeqCst);
+        let mut node: *mut Node<'a, T>;
+        let mut old = self.next_free.load(Ordering::Relaxed);
         loop {
             let ptr = match unsafe { old.as_mut() } {
                 Some(f) => {
                     //不是null，直接获取下一个节点
                     let n = f.next;
-                    node = Some(old);
+                    node = old;
                     n
                 }
                 None => {
@@ -78,13 +78,13 @@ impl<'a, T> Container<'a, T> {
                                 block.set_len(lock.next_block_size);
                                 lock.used_chunks.push(block.into_boxed_slice());
                                 lock.next_block_size *= 2; //每次添加储存后设置下次储存为上次的2倍
-                                node = Some(offset);
+                                node = offset;
                                 offset.add(1)
                             }
                         }
                         Err(_) => {
                             let _ = self.allocater.lock().unwrap(); //仅阻塞等待
-                            node = Some(self.alloc());
+                            node = self.alloc();
                             continue;
                         }
                     }
@@ -97,22 +97,14 @@ impl<'a, T> Container<'a, T> {
                 Ordering::SeqCst,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => break node.unwrap(),
+                Ok(_) => {
+                    unsafe{(*node).next=std::ptr::null_mut();}
+                    break node;
+                },
                 Err(x) => old = x,
             }
-            println!("循环");
         }
 
-        /*
-        Ok(_) => {
-                let n = node.unwrap();
-                unsafe {
-                    (*n).next = std::ptr::null_mut();
-                }
-                n
-            }
-            Err(_) => self.alloc(),
-        }*/
     }
 
     unsafe fn free(&self, f: *mut Node<'a, T>) {
@@ -168,11 +160,13 @@ fn it_works() {
     use std::time::Instant;
     let ctnr = Container::<&'static str>::new();
     let a = AtomicUsize::new(0);
-    let mut v = Vec::new();
+    let mut v = std::sync::Mutex::new(());
     let ins1 = Instant::now();
     for _ in 0..10_0000 {
-        v.push(NodeRef::get_new(&ctnr));
+        NodeRef::get_new(&ctnr);
+        //v=a.swap(1,Ordering::Relaxed);
         /*
+         *
         *a = Some("hello");
         let mut b = NodeRef::new(&ctnr);
         *b = Some("world");
@@ -182,13 +176,17 @@ fn it_works() {
         */
     }
     println!("{:?}", ins1.elapsed());
+    //format!("{}",v);
+
     let lock = ctnr.allocater.lock().unwrap();
     println!("{},{}", lock.used_chunks.len(), lock.next_block_size);
+    drop(lock);
 
-    let mut v = Vec::new();
+    let mut v = Box::new("mi");
     let ins2 = Instant::now();
     for _ in 0..10_0000 {
-        v.push(Box::new("kilikili"));
+        v=Box::new("kilikili");
     }
+    format!("{}",v);
     println!("{:?}", ins2.elapsed());
 }

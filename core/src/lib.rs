@@ -2,28 +2,31 @@ use std::{
     future::Future,
     ops::Deref,
     pin::Pin,
-    sync::{atomic::*, Arc},
+    sync::{atomic::*, Arc, Mutex},
     task::{Context, Poll, Waker},
     time::Duration,
 };
 
 use tokio::{sync::broadcast, task::JoinHandle};
 
-mod fastlink;
+//mod fastlink;
 mod runtime;
 
-pub struct EventTarget<A> {
-    sender: broadcast::Sender<A>,
-}
+pub struct ListenerList<A>(Vec<Box<FnMut(A)->>>);
 
-pub struct UnlistenHandle(JoinHandle<()>);
+pub struct UnlistenHandle(u64);
 
 pub struct EventName<const N: u64>;
 
 impl UnlistenHandle {
-    #[inline]
-    pub fn cancel(&self) {
-        self.0.abort();
+    fn new()->Self{
+        static COUNTER:AtomicU64 = AtomicU64::new(0);
+        let mut g=0;
+        COUNTER.fetch_update(|x|{
+            g=x.add_checked(1).expect("No more unique handle is available");
+            Some(g);
+        }).unwrap();
+        let uh=UnlistenHandle(*g);
     }
 }
 
@@ -34,25 +37,24 @@ impl<const N: u64> EventName<N> {
     }
 }
 
-impl<A> EventTarget<A>
+impl<A> ListenerList<A>
 where
-    A: Clone + Send + 'static,
+    A: Copy + 'static,
 {
     pub fn new(cap: usize) -> Self {
-        let (tx, _) = broadcast::channel(cap);
-        EventTarget { sender: tx }
+        ListenerList(Vec::new())
     }
 
-    pub fn emit(&self, args: A) {
-        //忽略错误
-        drop(self.sender.send(args))
+    pub fn emit(&mut self, args: A) {
+        for func in self.0.iter_mut(){
+            func(args);
+        }
     }
 
-    pub fn listen<F>(&self, mut func: F)
+    pub fn listen<F>(&self, mut func: F)->UnlistenHandle
     where
         F: FnMut(A) + Send + 'static,
     {
-        let mut rx = self.sender.subscribe();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -97,16 +99,24 @@ pub trait EventTargetAttachment {
 
 pub trait EventEmitter<A, const ID: u64>
 where
-    A: Clone + Send + 'static,
+    A: Copy + 'static,
 {
-    fn on<F: FnMut(A)>(&self, name: EventName<ID>) -> UnlistenHandle;
+    fn on<F: FnMut(A)+Send>(&self, name: EventName<ID>, func:F) -> UnlistenHandle;
     fn off(&self, handle: UnlistenHandle) -> bool;
 }
 
 pub trait OnceEventEmitter<A, const ID: u64>
 where
-    A: Clone + Send + 'static,
+    A: Copy + 'static,
 {
-    fn once<F: FnMut(A)>(&self, name: EventName<ID>) -> UnlistenHandle;
+    fn once<F: FnMut(A)+Send>(&self, name: EventName<ID>, func:F) -> UnlistenHandle;
     fn off(&self, handle: UnlistenHandle) -> bool;
+}
+
+#[test]
+fn example(){
+    struct MyStruct{
+        event1:ListenerList<(arg1,arg2)>,
+        event2:ListenerList<(arg3,)>
+    }
 }
