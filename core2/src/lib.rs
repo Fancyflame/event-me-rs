@@ -7,7 +7,7 @@ use std::{
     error::Error,
     fmt,
     marker::PhantomData,
-    ops::{Deref, DerefMut},
+    //ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, MutexGuard,
@@ -16,113 +16,15 @@ use std::{
 
 use private::*;
 
-macro_rules! _event {
-    ($name:ident,$shared:tt,$once:tt,$move:tt,$lock:ty,$($fnty:tt)*) => {
-        pub struct $name<A>(
-            _if!{
-                if $shared{
-                    Mutex<_if!{ if $once {Option<Listeners<dyn $($fnty)*>>} else {Listeners<dyn $($fnty)*>} }>
-                }else{
-                    RefCell<_if!{ if $once {Option<Listeners<dyn $($fnty)*>>} else {Listeners<dyn $($fnty)*>} }>
-                }
-            }
-        );
-        impl<A> $name<A>{
-            pub fn new()->Self{
-                $name(_if!{
-                    if $shared{
-                        Mutex::new(_if!{
-                            if $once{
-                                Some(HashMap::new())
-                            }else{
-                                HashMap::new()
-                            }
-                        })
-                    }else{
-                        RefCell::new(_if!{
-                            if $once{
-                                Some(HashMap::new())
-                            }else{
-                                HashMap::new()
-                            }
-                        })
-                    }
-                })
-            }
+#[cfg(feature = "multithread")]
+#[macro_use]
+extern crate lazy_static;
 
-            pub fn with_capacity(n:usize)->Self{
-                $name(_if!{
-                    if $shared{
-                        Mutex::new(_if!{
-                            if $once{
-                                Some(HashMap::with_capacity(n))
-                            }else{
-                                HashMap::with_capacity(n)
-                            }
-                        })
-                    }else{
-                        RefCell::new(_if!{
-                            if $once{
-                                Some(HashMap::with_capacity(n))
-                            }else{
-                                HashMap::with_capacity(n)
-                            }
-                        })
-                    }
-                })
-            }
+#[cfg(feature = "multithread")]
+pub mod multithread;
 
-            pub fn listen<F:$($fnty)*>(&self,func:F)->CancelHandle{
-                let ch=CancelHandle::new();
-                (_if! {
-            if $shared{
-                self.0.lock()
-            }else{
-                self.0.borrow_mut()
-            }
-        }).insert(ch.clone(),func);
-                ch
-            }
-
-            pub fn unlisten(&self,ch:CancelHandle)->Option<Box<dyn $($fnty)*>>{
-                _fetch_mut!($shared).remove(&ch)
-            }
-        }
-    };
-}
-
-macro_rules! _if {
-    {
-        if 1 {
-            $($true:tt)*
-        }else{
-            $($false:tt)*
-        }
-    } => {
-        $($true)*
-    };
-    {
-        if 0 {
-            $($true:tt)*
-        }else{
-            $($false:tt)*
-        }
-    } => {
-        $($false)*
-    };
-}
-
-macro_rules! _fetch_mut {
-    ($shared:tt) => {
-        _if! {
-            if $shared{
-                self.0.lock()
-            }else{
-                self.0.borrow_mut()
-            }
-        }
-    };
-}
+#[cfg(feature = "multithread")]
+pub use multithread::*;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CancelHandle(u64);
@@ -134,48 +36,30 @@ impl CancelHandle {
     }
 }
 
-/*_event!(Er, 0, 0, 0, RefCell, FnMut(A));
-_event!(Ser, 1, 0, 0, Mutex, FnMut(A) + Send);
-_event!(Oer, 0, 1, 0, RefCell, FnOnce(A));
-_event!(Mer, 0, 0, 1, RefCell, FnMut(A));
-_event!(Soer, 1, 1, 0, Mutex, FnOnce(A) + Send);
-_event!(Omer, 0, 1, 1, RefCell, FnOnce(A));
-_event!(Smer, 1, 0, 1, Mutex, FnMut(A) + Send);
-_event!(Somer, 1, 1, 1, Mutex, FnOnce(A) + Send);*/
-
-/*trait EmitCounts<A, E:ListenerManager<A>, C: ListenerContainer<A,E>> {
-    fn _try_emit(&mut self) -> Option<&mut C>;
-}
-
-trait ListenerContainer<A,E:ListenerManager<A>> {
-    type Target: DerefMut<Target = E>;
-    fn _get_mut(self) -> Self::Target;
-}
-
-trait ListenerManager<A>{
-
-}*/
-
 mod private {
     pub trait EmitCountLimitation {}
     pub trait ArgsOperation {}
-    pub trait From2<T> {
-        fn from2(t: T) -> Self;
+    pub trait ExecuteMethod {}
+    pub trait Into2<T> {
+        fn into2(self) -> T;
+    }
+    pub enum Listener<'a, A> {
+        Once(Box<dyn FnOnce(A) + 'a>),
+        Reusable(Box<dyn FnMut(A) + 'a>),
+        Called,
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct CanOnlyCallOnceError;
 
-pub struct Local<T>(RefCell<T>);
+pub struct SingleThreaded;
 
-pub struct Shared<T>(Mutex<T>);
-
-pub type OnceInner<A, O> = ListenerManager<Box<dyn FnOnce(A)>, Once, O>;
+pub type OnceInner<'a, A, O, M> = ListenerManager<Box<dyn FnOnce(A) + 'a>, Once, O, M>;
 
 pub struct Once;
 
-pub type ReusableInner<A, O> = ListenerManager<Listener<'static, A>, Reusable, O>;
+pub type ReusableInner<'a, A, O, M> = ListenerManager<Listener<'a, A>, Reusable, O, M>;
 
 pub struct Reusable;
 
@@ -183,15 +67,9 @@ pub struct CloneArgs;
 
 pub struct MoveArgs;
 
-pub struct ListenerManager<F, C, O> {
+pub struct ListenerManager<F, C, O, M> {
     listeners: VecDeque<(CancelHandle, F)>,
-    _marker: (PhantomData<C>, PhantomData<O>),
-}
-
-pub enum Listener<'a, A> {
-    Once(Box<dyn FnOnce(A) + 'a>),
-    Reusable(Box<dyn FnMut(A) + 'a>),
-    Called,
+    _marker: (PhantomData<C>, PhantomData<O>, PhantomData<M>),
 }
 
 //实现多次触发单次事件的错误
@@ -204,59 +82,34 @@ impl fmt::Display for CanOnlyCallOnceError {
 
 impl Error for CanOnlyCallOnceError {}
 
-//实现单线程/多线程/异步的容器
-
-impl<'a, T> Local<T> {
-    #[inline]
-    fn new(v: T) -> Self {
-        Local(RefCell::new(v))
-    }
-
-    #[inline]
-    fn get_mut(&'a self) -> RefMut<'a, T> {
-        self.0.borrow_mut()
-    }
-}
-
-impl<'a, T> Shared<T> {
-    #[inline]
-    fn new(v: T) -> Self {
-        Shared(Mutex::new(v))
-    }
-
-    #[inline]
-    fn get_mut(&'a self) -> MutexGuard<'a, T> {
-        self.0.lock().unwrap()
-    }
-}
-
 //配置
 
 impl EmitCountLimitation for Reusable {}
 impl EmitCountLimitation for Once {}
 impl ArgsOperation for CloneArgs {}
 impl ArgsOperation for MoveArgs {}
+impl ExecuteMethod for SingleThreaded {}
 
-impl<'a, A, F: FnMut(A) + 'a> From2<F> for Box<dyn FnMut(A) + 'a> {
-    fn from2(f: F) -> Self {
-        Box::new(f)
+impl<'a, A, F: FnMut(A) + 'a> Into2<Box<dyn FnMut(A) + 'a>> for F {
+    fn into2(self) -> Box<dyn FnMut(A) + 'a> {
+        Box::new(self)
     }
 }
 
-impl<'a, A> From2<Listener<'a, A>> for Listener<'a, A> {
-    fn from2(t: Listener<'a, A>) -> Self {
-        t
+impl<'a, A> Into2<Listener<'a, A>> for Listener<'a, A> {
+    fn into2(self) -> Listener<'a, A> {
+        self
     }
 }
 
 //监听者管理
 
 impl<'a, A> Listener<'a, A> {
-    pub fn from_mut<F: FnMut(A) + 'a>(f: F) -> Self {
+    fn from_mut<F: FnMut(A) + 'a>(f: F) -> Self {
         Listener::Reusable(Box::new(f) as Box<dyn FnMut(A)>)
     }
 
-    pub fn from_once<F: FnOnce(A) + 'a>(f: F) -> Self {
+    fn from_once<F: FnOnce(A) + 'a>(f: F) -> Self {
         Listener::Once(Box::new(f) as Box<dyn FnOnce(A)>)
     }
 
@@ -267,13 +120,13 @@ impl<'a, A> Listener<'a, A> {
         }
     }
 
-    fn call(&mut self, args: A) -> bool {
+    fn call<M: ExecuteMethod>(&mut self, args: A) -> bool {
         match self {
             Listener::Once(_) => {
                 let f = std::mem::replace(self, Listener::Called);
                 match f {
                     Listener::Once(func) => {
-                        func(args);
+                        M::exec(func, args);
                         true
                     }
                     _ => unreachable!(),
@@ -281,14 +134,14 @@ impl<'a, A> Listener<'a, A> {
             }
             Listener::Called => true,
             Listener::Reusable(func) => {
-                func(args);
+                M::exec(func, args);
                 false
             }
         }
     }
 }
 
-impl<F, C: EmitCountLimitation, O: ArgsOperation> ListenerManager<F, C, O> {
+impl<F, C: EmitCountLimitation, O: ArgsOperation, M: ExecuteMethod> ListenerManager<F, C, O, M> {
     #[inline]
     pub fn new() -> Self {
         ListenerManager {
@@ -305,14 +158,13 @@ impl<F, C: EmitCountLimitation, O: ArgsOperation> ListenerManager<F, C, O> {
         }
     }
 
-    pub fn listen<B: Into<F>>(&mut self, f: B) -> CancelHandle {
+    fn _listen(&mut self, f: F) -> CancelHandle {
         let ch = CancelHandle::new();
-        self.listeners.push_back((ch.clone(), f.into()));
+        self.listeners.push_back((ch.clone(), f));
         ch
     }
 
-    #[inline]
-    pub fn unlisten(&mut self, ch: CancelHandle) -> Option<F> {
+    fn _unlisten(&mut self, ch: CancelHandle) -> Option<F> {
         for (index, (ch_cmp, _)) in self.listeners.iter().enumerate() {
             if *ch_cmp == ch {
                 return self.listeners.remove(index).map(|x| x.1);
@@ -324,19 +176,46 @@ impl<F, C: EmitCountLimitation, O: ArgsOperation> ListenerManager<F, C, O> {
 
 //可复用事件
 
-impl<A: Clone> ReusableInner<A, CloneArgs> {
+impl<'a, A, O: ArgsOperation, M: ExecuteMethod> ReusableInner<'a, A, O, M> {
+    pub fn listen<F: FnMut(A) + 'a>(&mut self, f: F) -> CancelHandle {
+        self._listen(Listener::from_mut(f))
+    }
+
+    pub fn listen_once<F: FnOnce(A) + 'a>(&mut self, f: F) -> CancelHandle {
+        self._listen(Listener::from_once(f))
+    }
+
+    pub fn unlisten(&mut self, ch: CancelHandle) -> Option<Box<dyn FnMut(A) + 'a>> {
+        match self._unlisten(ch) {
+            Some(Listener::Reusable(func)) => Some(func),
+            _ => None,
+        }
+    }
+
+    pub fn unlisten_once(&mut self, ch: CancelHandle) -> Option<Box<dyn FnOnce(A) + 'a>> {
+        match self._unlisten(ch) {
+            Some(Listener::Reusable(_func)) => {
+                None //TODO
+            }
+            Some(Listener::Once(func)) => Some(func),
+            _ => None,
+        }
+    }
+}
+
+impl<A: Clone, M: ExecuteMethod> ReusableInner<'_, A, CloneArgs, M> {
     pub fn emit(&mut self, args: A) {
         for (_, func) in self.listeners.iter_mut() {
-            func.call(args.clone());
+            func.call::<M>(args.clone());
         }
         self.listeners.retain(|x| x.1.needs_drop());
     }
 }
 
-impl<A> ReusableInner<A, MoveArgs> {
+impl<A, M: ExecuteMethod> ReusableInner<'_, A, MoveArgs, M> {
     pub fn emit(&mut self, args: A) {
         if let Some(func) = self.listeners.get_mut(0) {
-            func.1.call(args);
+            func.1.call::<M>(args);
             if func.1.needs_drop() {
                 self.listeners.pop_front();
             }
@@ -346,35 +225,54 @@ impl<A> ReusableInner<A, MoveArgs> {
 
 //单次事件
 
-impl<A: Clone> OnceInner<A, CloneArgs> {
+impl<'a, A, O: ArgsOperation, M: ExecuteMethod> OnceInner<'a, A, O, M> {
+    pub fn listen_once<F: FnOnce(A) + 'a>(&mut self, f: F) -> CancelHandle {
+        self._listen(Box::new(f))
+    }
+
+    pub fn unlisten(&mut self, ch: CancelHandle) -> Option<Box<dyn FnOnce(A) + 'a>> {
+        self._unlisten(ch)
+    }
+}
+
+impl<A: Clone, M: ExecuteMethod> OnceInner<'_, A, CloneArgs, M> {
     pub fn emit(self, args: A) {
         for (_, func) in self.listeners.into_iter() {
-            func(args.clone())
+            M::exec(func, args.clone())
         }
     }
 }
 
-impl<A> OnceInner<A, MoveArgs> {
+impl<A, M: ExecuteMethod> OnceInner<'_, A, MoveArgs, M> {
     pub fn emit(mut self, args: A) {
         if let Some((_, func)) = self.listeners.pop_front() {
-            func(args);
+            M::exec(func, args)
         }
+    }
+}
+
+//执行者
+
+impl SingleThreaded {
+    #[inline]
+    fn exec<A, F: FnOnce(A)>(f: F, args: A) {
+        f(args);
     }
 }
 
 //输出
 
-pub type EventReg<A> = ReusableInner<A, CloneArgs>;
-pub type MoveEventReg<A> = ReusableInner<A, MoveArgs>;
-pub type OnceEventReg<A> = OnceInner<A, CloneArgs>;
-pub type OnceMoveEventReg<A> = OnceInner<A, MoveArgs>;
+pub type EventReg<'a, A> = ReusableInner<'a, A, CloneArgs, SingleThreaded>;
+pub type MoveEventReg<'a, A> = ReusableInner<'a, A, MoveArgs, SingleThreaded>;
+pub type OnceEventReg<'a, A> = OnceInner<'a, A, CloneArgs, SingleThreaded>;
+pub type OnceMoveEventReg<'a, A> = OnceInner<'a, A, MoveArgs, SingleThreaded>;
 
+#[test]
 fn test() {
-    fn foo<F: Into<Box<dyn Fn(u32)>>>(f: F) {}
-    impl<'a, F: Fn(u32) + 'a> Into<Box<dyn Fn(u32) + 'a>> for F {
-        fn from(f: F) -> Self {
-            Box::new(f)
-        }
-    }
-    foo(|int| println!("Input: {}", int));
+    let out = std::cell::Cell::new(0);
+    let mut a = EventReg::<u32>::new();
+    a.listen(|num| out.set(num));
+    a.listen(|num| out.set(num + 200));
+    a.emit(100);
+    assert_eq!(out.get(), 300);
 }
