@@ -13,59 +13,57 @@ use std::{
 };
 
 trait ExecCounts {}
-trait ExecArgsProcess<'a, A: 'a> {
-    fn exec_list<I, E>(iter: I, args: A)
-    where
-        I: Iterator<Item = Callable<'a, A>>,
-        E: Executor<'a>;
+trait ExecArgsProcess {}
+pub trait MultiThreadExecutor {
+    fn exec<A:Send+'static>(f: SharedCallable<A>, args: A);
 }
-trait Executor<'a> {
-    fn exec<A: 'a>(f: Callable<'a, A>, args: A);
+pub trait LocalThreadExecutor{
+    fn exec<A>(f:Callable<'_,A>,args:A);
 }
 trait Into2<T> {
     fn into2(self) -> T;
 }
 
-struct Once;
+/*struct Once;
 struct Multiple;
 impl ExecCounts for Once {}
-impl ExecCounts for Multiple {}
+impl ExecCounts for Multiple {}*/
 
-struct Move;
-struct Cloning;
-//impl ExecArgsProcess for Move {}
+pub struct Moving;
+pub struct Cloning;
+//impl ExecArgsProcess for Moving {}
 //impl ExecArgsProcess for Cloning {}
 
-struct MultiThread;
-struct LocalThread;
+pub struct MultiThread;
+pub struct LocalThread;
 //impl Executor<'static> for MultiThread{}
 //impl<'a> Executor<'a> for LocalThread{}
 
-enum Listener<'a, A> {
+pub enum Listener<'a, A> {
     Once(Box<dyn FnOnce(A) + 'a>),
     Multiple(Box<dyn FnMut(A) + 'a>),
     Called,
 }
 
-enum SharedListener<A> {
-    Once(Box<dyn FnOnce(A) + 'static>),
-    Multiple(Arc<dyn Fn(A) + 'static>),
+pub enum SharedListener<A:Send+'static> {
+    Once(Box<dyn FnOnce(A) + Send + 'static>),
+    Multiple(Arc<dyn Fn(A) + Send + Sync + 'static>),
     Called,
 }
 
-enum Callable<'a, A> {
+pub enum Callable<'a, A> {
     BoxedFnOnce(Box<dyn FnOnce(A) + 'a>),
     RefFnMut(&'a mut (dyn FnMut(A) + 'a)),
 }
 
-enum SharedCallable<A: Send> {
+pub enum SharedCallable<A: Send+'static> {
     BoxedFnOnce(Box<dyn FnOnce(A) + Send + 'static>),
-    ArcFn(Arc<dyn Fn(A) + Send + 'static>),
+    ArcFn(Arc<dyn Fn(A) + Send + Sync + 'static>),
 }
 
-pub struct ListenerManager<F, C, P, E> {
+pub struct ListenerManager<F, P, E> {
     listeners: VecDeque<(CancelHandle, F)>,
-    _marker: (PhantomData<C>, PhantomData<P>, PhantomData<E>),
+    _marker: (PhantomData<P>, PhantomData<E>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -81,12 +79,12 @@ impl CancelHandle {
 //监听者管理
 
 impl<'a, A> Listener<'a, A> {
-    fn from_fn_mut<F: Fn(A) + 'a>(f: F) -> Self {
-        Listener::Multiple(Box::new(f) as Box<dyn FnMut(A)>)
+    fn from_fn_mut<F: FnMut(A) + 'a>(f: F) -> Self {
+        Listener::Multiple(Box::new(f))
     }
 
-    fn from_once<F: FnOnce(A) + 'a>(f: F) -> Self {
-        Listener::Once(Box::new(f) as Box<dyn FnOnce(A)>)
+    fn from_fn_once<F: FnOnce(A) + 'a>(f: F) -> Self {
+        Listener::Once(Box::new(f))
     }
 
     fn needs_drop(&self) -> bool {
@@ -96,7 +94,7 @@ impl<'a, A> Listener<'a, A> {
         }
     }
 
-    fn call(&'a mut self) -> (Callable<'a, A>, bool) {
+    fn get(&mut self) -> (Callable<'_, A>, bool) {
         match self {
             Listener::Once(_) => {
                 let f = std::mem::replace(self, Listener::Called);
@@ -106,17 +104,17 @@ impl<'a, A> Listener<'a, A> {
                 }
             }
             Listener::Called => panic!("This function impls FnOnce and has been called"),
-            Listener::Multiple(func) => (Callable::RefFnMut(func), false),
+            Listener::Multiple(ref mut func) => (Callable::RefFnMut(func), false),
         }
     }
 }
 
-impl<A> SharedListener<A> {
-    fn from_fn<F: Fn(A) + 'static>(f: F) -> Self {
+impl<A:Send> SharedListener<A> {
+    fn from_fn<F: Fn(A) + Send + Sync + 'static>(f: F) -> Self {
         SharedListener::Multiple(Arc::new(f))
     }
 
-    fn from_once<F: FnOnce(A) + 'static>(f: F) -> Self {
+    fn from_fn_once<F: FnOnce(A) + Send + 'static>(f: F) -> Self {
         SharedListener::Once(Box::new(f))
     }
 
@@ -127,22 +125,22 @@ impl<A> SharedListener<A> {
         }
     }
 
-    fn call(&mut self) -> (Callable<'static, A>, bool) {
+    fn get(&mut self) -> (SharedCallable<A>, bool) {
         match self {
             SharedListener::Once(_) => {
                 let f = std::mem::replace(self, SharedListener::Called);
                 match f {
-                    SharedListener::Once(func) => (Callable::BoxedFnOnce(func), true),
+                    SharedListener::Once(func) => (SharedCallable::BoxedFnOnce(func), true),
                     _ => unreachable!(),
                 }
             }
-            SharedListener::Called => panic!("This function impls FnOnce and has been called"),
-            SharedListener::Multiple(func) => (Callable::ArcFn(func.clone()), false),
+            SharedListener::Called => panic!("This function only impls FnOnce and has been called"),
+            SharedListener::Multiple(func) => (SharedCallable::ArcFn(func.clone()), false),
         }
     }
 }
 
-impl<F, C, P, E> ListenerManager<F, C, P, E> {
+impl<F, P, E> ListenerManager<F, P, E> {
     #[inline]
     pub fn new() -> Self {
         ListenerManager {
@@ -158,6 +156,11 @@ impl<F, C, P, E> ListenerManager<F, C, P, E> {
             _marker: Default::default(),
         }
     }
+
+    /*#[inline]
+    fn iter_mut<'a>(&'a mut self)->std::collections::vec_deque::IterMut<'a,F>{
+        self.listeners.iter_mut()
+    }*/
 
     fn _listen(&mut self, f: F) -> CancelHandle {
         let ch = CancelHandle::new();
@@ -175,40 +178,11 @@ impl<F, C, P, E> ListenerManager<F, C, P, E> {
     }
 }
 
-//执行次数分配
-
-impl<F, P, E> ListenerManager<F, Once, P, E> {}
-
-//参数分配器
-
-impl<'a, A: 'a> ExecArgsProcess<'a, A> for Move {
-    fn exec_list<I, E>(mut iter: I, args: A)
-    where
-        I: Iterator<Item = Callable<'a, A>>,
-        E: Executor<'a>,
-    {
-        if let Some(n) = iter.next() {
-            E::exec(n, args);
-        }
-    }
-}
-
-impl<'a, A: Clone + 'a> ExecArgsProcess<'a, A> for Cloning {
-    fn exec_list<I, E>(iter: I, args: A)
-    where
-        I: Iterator<Item = Callable<'a, A>>,
-        E: Executor<'a>,
-    {
-        for n in iter {
-            E::exec(n, args.clone());
-        }
-    }
-}
-
 //执行器
 
 impl<'a, A> Callable<'a, A> {
-    fn call(self, args: A) {
+    #[inline]
+    pub fn call(self, args: A) {
         match self {
             Callable::BoxedFnOnce(func) => func(args),
             Callable::RefFnMut(func) => func(args),
@@ -217,24 +191,159 @@ impl<'a, A> Callable<'a, A> {
 }
 
 impl<A: Send> SharedCallable<A> {
-    fn call(self, args: A) {
+    #[inline]
+    pub fn call(self, args: A) {
         match self {
-            //TODO
-            Callable::BoxedFnOnce(func) => func(args),
-            Callable::RefFnMut(func) => func(args),
+            SharedCallable::BoxedFnOnce(func) => func(args),
+            SharedCallable::ArcFn(func) => func(args),
         }
     }
 }
 
-impl Executor<'static> for MultiThread {
-    fn exec<A>(func: Callable<'static, A>, args: A) {
-        std::thread::spawn(|| func.call(args));
+//注册方法
+
+impl<'a,A,P,E> ListenerManager<Listener<'a,A>,P,E>{
+    #[inline]
+    pub fn listen(&mut self,f:impl FnMut(A)+'a)->CancelHandle{
+        self._listen(Listener::from_fn_mut(f))
+    }
+
+    #[inline]
+    pub fn listen_once(&mut self,f:impl FnOnce(A)+'a)->CancelHandle{
+        self._listen(Listener::from_fn_once(f))
+    }
+
+    #[inline]
+    pub fn unlisten(&mut self,ch:CancelHandle)->Option<Listener<'a,A>>{
+        self._unlisten(ch)
     }
 }
 
-impl<'a> Executor<'a> for LocalThread {
+impl<A:Send,P,E:MultiThreadExecutor> ListenerManager<SharedListener<A>,P,E>{
     #[inline]
-    fn exec<A>(func: Callable<'a, A>, args: A) {
-        func.call(args);
+    pub fn listen(&mut self,f:impl Fn(A)+Send+Sync+'static)->CancelHandle{
+        self._listen(SharedListener::from_fn(f))
     }
+
+    #[inline]
+    pub fn listen_once(&mut self,f:impl FnOnce(A)+Send+'static)->CancelHandle{
+        self._listen(SharedListener::from_fn_once(f))
+    }
+
+    #[inline]
+    pub fn unlisten(&mut self,ch:CancelHandle)->Option<SharedListener<A>>{
+        self._unlisten(ch)
+    }
+}
+
+//实现
+
+macro_rules! _impl{
+    (cloning)=>{
+        pub fn emit(&mut self,args:A){
+            for (_,x) in self.listeners.iter_mut(){
+                E::exec(x.get().0,args.clone());
+            }
+            self.listeners.retain(|(_,x)|!x.needs_drop());
+        }
+    };
+    (moving)=>{
+        pub fn emit(&mut self,args:A){
+            let (c,needs_drop)=self.listeners.front_mut().unwrap().1.get();
+            E::exec(c,args);
+            if needs_drop{
+                self.listeners.pop_front();
+            }
+        }
+    }
+}
+
+impl<'a,A:Clone,E:LocalThreadExecutor> ListenerManager<Listener<'a,A>,Cloning,E>{
+    _impl!(cloning);
+}
+
+impl<'a,A,E:LocalThreadExecutor> ListenerManager<Listener<'a,A>,Moving,E>{
+    _impl!(moving);
+}
+
+impl<'a,A:Clone+Send+'static,E:MultiThreadExecutor> ListenerManager<SharedListener<A>,Cloning,E>{
+    _impl!(cloning);
+}
+
+impl<'a,A:Send+'static,E:MultiThreadExecutor> ListenerManager<SharedListener<A>,Moving,E>{
+    _impl!(moving);
+}
+
+//提供两个默认模板
+
+impl LocalThreadExecutor for LocalThread{
+    #[inline]
+    fn exec<A>(f:Callable<'_,A>,args:A){
+        f.call(args);
+    }
+}
+
+impl MultiThreadExecutor for MultiThread{
+    #[inline]
+    fn exec<A:Send+'static>(f:SharedCallable<A>,args:A){
+        std::thread::spawn(||f.call(args));
+    }
+}
+
+
+pub type LocalCloneEvent<'a,A> = ListenerManager<Listener<'a,A>,Cloning,LocalThread>;
+pub type LocalMoveEvent<'a,A> = ListenerManager<Listener<'a,A>,Moving,LocalThread>;
+pub type SharedCloneEvent<A> = ListenerManager<SharedListener<A>,Cloning,MultiThread>;
+pub type SharedMoveEvent<A> = ListenerManager<SharedListener<A>,Moving,MultiThread>;
+
+
+#[test]
+fn test1(){
+    let k=std::cell::Cell::new(0);
+    let mut a=LocalCloneEvent::<u32,LocalThread>::new();
+
+    a.listen(|num|{
+        k.set(num);
+    });
+
+    a.listen_once(|num|{
+        k.set(num+100);
+    });
+
+    a.emit(100);
+    assert_eq!(k.get(),200);
+
+    a.emit(100);
+    assert_eq!(k.get(),100);
+}
+
+#[test]
+fn test2(){
+    let mut a=SharedMoveEvent::<u32>::new();
+    let mutex=std::sync::Arc::new(std::sync::Mutex::new(0));
+
+    let m=mutex.clone();
+    a.listen_once(move|num|{
+        *m.lock().unwrap()+=1;
+        assert_eq!(num,1);
+    });
+
+    let m=mutex.clone();
+    let ch=a.listen_once(move|num|{
+        *m.lock().unwrap()+=2;
+        assert_eq!(num,2);
+    });
+
+    let m=mutex.clone();
+    a.listen(move|num|{
+        *m.lock().unwrap()+=num;
+        assert!(num==2||num==3);
+    });
+
+    a.unlisten(ch);
+    a.emit(1);
+    a.emit(2);
+    a.emit(3);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(*mutex.lock().unwrap(),6);
 }
