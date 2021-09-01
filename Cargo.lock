@@ -3,7 +3,7 @@
 version = 3
 
 [[package]]
-name = "core2"
+name = "event-me"
 version = "0.1.0"
 dependencies = [
  "lazy_static",

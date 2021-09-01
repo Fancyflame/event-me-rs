@@ -1,21 +1,19 @@
-use std::{
-    sync::Mutex
-}
 use crate::*;
-use threadpool;
+use std::sync::Mutex;
+use threadpool::ThreadPool;
 
 pub struct MultiThread;
-pub type MultiThreadCloneEvent<A> = ListenerManager<SharedListener<A>, Cloning, MultiThread>;
-pub type MultiThreadMoveEvent<A> = ListenerManager<SharedListener<A>, Moving, MultiThread>;
+pub type MultiThreadCloneEvent<A> = EventTarget<SharedListener<A>, Cloning, MultiThread>;
+pub type MultiThreadMoveEvent<A> = EventTarget<SharedListener<A>, Moving, MultiThread>;
 
-lazy_static!{
-    static ref POOL:Mutex<threadpool::ThreadPool>=
+lazy_static! {
+    static ref POOL: Mutex<ThreadPool> = Mutex::new(ThreadPool::default());
 }
 
 impl MultiThreadExecutor for MultiThread {
     #[inline]
     fn exec<A: Send + 'static>(f: SharedCallable<A>, args: A) {
-        std::thread::spawn(|| f.call(args));
+        POOL.lock().unwrap().execute(|| f.call(args));
     }
 }
 

@@ -4,17 +4,32 @@ use std::{
     marker::PhantomData,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex
     },
+    future::Future,
+    pin::Pin,
+    ops::Deref,
+    rc::Rc,
+    cell::RefCell,
+    task::{Waker,Context,Poll}
 };
 
-#[cfg(features = "thread-pool")]
-pub mod multi_thread;
+#[cfg(feature = "thread-pool")]
+#[macro_use]
+extern crate lazy_static;
 
-#[cfg(features = "thread-pool")]
-pub use multi_thread::*;
+#[cfg(feature = "thread-pool")]
+pub mod thread_pool;
 
-trait ExecCounts {}
+#[cfg(feature = "thread-pool")]
+pub use thread_pool::*;
+
+/*#[cfg(features = "tokio-rt")]
+pub mod tokio_rt;
+
+#[cfg(features = "tokio-rt")]
+pub use tokio_rt::*;*/
+
 trait ExecArgsProcess {}
 pub trait MultiThreadExecutor {
     fn exec<A: Send + 'static>(f: SharedCallable<A>, args: A);
@@ -22,23 +37,23 @@ pub trait MultiThreadExecutor {
 pub trait LocalThreadExecutor {
     fn exec<A>(f: Callable<'_, A>, args: A);
 }
-trait Into2<T> {
-    fn into2(self) -> T;
+trait RefCount<T> {
+    unsafe fn get_mut_unchecked<'a>(&'a self)->&'a mut T;
 }
-
-/*struct Once;
-struct Multiple;
-impl ExecCounts for Once {}
-impl ExecCounts for Multiple {}*/
 
 pub struct Moving;
 pub struct Cloning;
-//impl ExecArgsProcess for Moving {}
-//impl ExecArgsProcess for Cloning {}
-
 pub struct LocalThread;
-//impl Executor<'static> for MultiThread{}
-//impl<'a> Executor<'a> for LocalThread{}
+
+
+pub struct AsyncListener<A>{
+    inner:Rc<(RefCell<Option<A>>,RefCell<Option<Waker>>)>
+}
+
+pub struct SharedAsyncListener<A>{
+    inner:Arc<(Mutex<Option<A>>,Mutex<Option<Waker>>)>
+}
+
 
 pub enum Listener<'a, A> {
     Once(Box<dyn FnOnce(A) + 'a>),
@@ -52,6 +67,7 @@ pub enum SharedListener<A: Send + 'static> {
     Called,
 }
 
+
 pub enum Callable<'a, A> {
     BoxedFnOnce(Box<dyn FnOnce(A) + 'a>),
     RefFnMut(&'a mut (dyn FnMut(A) + 'a)),
@@ -62,7 +78,8 @@ pub enum SharedCallable<A: Send + 'static> {
     ArcFn(Arc<dyn Fn(A) + Send + Sync + 'static>),
 }
 
-pub struct ListenerManager<F, P, E> {
+
+pub struct EventTarget<F, P, E> {
     listeners: VecDeque<(CancelHandle, F)>,
     _marker: (PhantomData<P>, PhantomData<E>),
 }
@@ -141,10 +158,10 @@ impl<A: Send> SharedListener<A> {
     }
 }
 
-impl<F, P, E> ListenerManager<F, P, E> {
+impl<F, P, E> EventTarget<F, P, E> {
     #[inline]
     pub fn new() -> Self {
-        ListenerManager {
+        EventTarget {
             listeners: VecDeque::new(),
             _marker: Default::default(),
         }
@@ -152,7 +169,7 @@ impl<F, P, E> ListenerManager<F, P, E> {
 
     #[inline]
     pub fn with_capacity(n: usize) -> Self {
-        ListenerManager {
+        EventTarget {
             listeners: VecDeque::with_capacity(n),
             _marker: Default::default(),
         }
@@ -176,6 +193,40 @@ impl<F, P, E> ListenerManager<F, P, E> {
             }
         }
         None
+    }
+}
+
+//异步执行器
+
+impl<A> Future for AsyncListener<A>{
+    type Output=A;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>)->Poll<A>{
+        let mut waker=self.inner.1.borrow_mut();
+        match self.inner.0.borrow_mut().take(){
+            Some(n)=>Poll::Ready(n),
+            None=>{
+                if waker.is_none(){
+                    *waker=Some(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<A> Future for SharedAsyncListener<A>{
+    type Output=A;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>)->Poll<A>{
+        let mut waker=self.inner.1.lock().unwrap();
+        match self.inner.0.lock().unwrap().take(){
+            Some(n)=>Poll::Ready(n),
+            None=>{
+                if waker.is_none(){
+                    *waker=Some(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -203,7 +254,7 @@ impl<A: Send> SharedCallable<A> {
 
 //注册方法
 
-impl<'a, A, P, E> ListenerManager<Listener<'a, A>, P, E> {
+impl<'a, A:'a, P, E:LocalThreadExecutor> EventTarget<Listener<'a, A>, P, E> {
     #[inline]
     pub fn listen(&mut self, f: impl FnMut(A) + 'a) -> CancelHandle {
         self._listen(Listener::from_fn_mut(f))
@@ -218,9 +269,23 @@ impl<'a, A, P, E> ListenerManager<Listener<'a, A>, P, E> {
     pub fn unlisten(&mut self, ch: CancelHandle) -> Option<Listener<'a, A>> {
         self._unlisten(ch)
     }
+
+    pub fn wait_for(&mut self)->AsyncListener<A>{
+        let inner=Rc::new((RefCell::new(None),RefCell::new(None)));
+        let al=AsyncListener{
+            inner:inner.clone()
+        };
+        self.listen_once(move|args|{
+            *inner.0.borrow_mut()=Some(args);
+            if let Some(waker)=inner.1.borrow_mut().take(){
+                waker.wake();
+            }
+        });
+        al
+    }
 }
 
-impl<A: Send, P, E: MultiThreadExecutor> ListenerManager<SharedListener<A>, P, E> {
+impl<A: Send, P, E: MultiThreadExecutor> EventTarget<SharedListener<A>, P, E> {
     #[inline]
     pub fn listen(&mut self, f: impl Fn(A) + Send + Sync + 'static) -> CancelHandle {
         self._listen(SharedListener::from_fn(f))
@@ -234,6 +299,22 @@ impl<A: Send, P, E: MultiThreadExecutor> ListenerManager<SharedListener<A>, P, E
     #[inline]
     pub fn unlisten(&mut self, ch: CancelHandle) -> Option<SharedListener<A>> {
         self._unlisten(ch)
+    }
+
+    pub fn wait_for(&mut self)->SharedAsyncListener<A>{
+        let inner=Arc::new((Mutex::new(None),Mutex::new(None)));
+        let al=SharedAsyncListener{
+            inner:inner.clone()
+        };
+        self.listen_once(move|args|{
+            *inner.0.lock().unwrap()=Some(args);
+            if let Ok(mut g)=inner.1.lock(){
+                if let Some(waker)=g.take(){
+                    waker.wake();
+                }
+            }
+        });
+        al
     }
 }
 
@@ -259,21 +340,21 @@ macro_rules! _impl {
     };
 }
 
-impl<'a, A: Clone, E: LocalThreadExecutor> ListenerManager<Listener<'a, A>, Cloning, E> {
+impl<'a, A: Clone, E: LocalThreadExecutor> EventTarget<Listener<'a, A>, Cloning, E> {
     _impl!(cloning);
 }
 
-impl<'a, A, E: LocalThreadExecutor> ListenerManager<Listener<'a, A>, Moving, E> {
+impl<'a, A, E: LocalThreadExecutor> EventTarget<Listener<'a, A>, Moving, E> {
     _impl!(moving);
 }
 
 impl<'a, A: Clone + Send + 'static, E: MultiThreadExecutor>
-    ListenerManager<SharedListener<A>, Cloning, E>
+    EventTarget<SharedListener<A>, Cloning, E>
 {
     _impl!(cloning);
 }
 
-impl<'a, A: Send + 'static, E: MultiThreadExecutor> ListenerManager<SharedListener<A>, Moving, E> {
+impl<'a, A: Send + 'static, E: MultiThreadExecutor> EventTarget<SharedListener<A>, Moving, E> {
     _impl!(moving);
 }
 
@@ -286,13 +367,20 @@ impl LocalThreadExecutor for LocalThread {
     }
 }
 
-pub type LocalCloneEvent<'a, A> = ListenerManager<Listener<'a, A>, Cloning, LocalThread>;
-pub type LocalMoveEvent<'a, A> = ListenerManager<Listener<'a, A>, Moving, LocalThread>;
+impl MultiThreadExecutor for LocalThread {
+    #[inline]
+    fn exec<A:Send+'static>(f: SharedCallable<A>, args: A) {
+        f.call(args);
+    }
+}
+
+pub type LocalEvent<'a, A, P, E> = EventTarget<Listener<'a, A>, P, E>;
+pub type SharedEvent<A, P, E> = EventTarget<SharedListener<A>, P, E>;
 
 #[test]
 fn test1() {
     let k = std::cell::Cell::new(0);
-    let mut a = LocalCloneEvent::<u32>::new();
+    let mut a = LocalEvent::<u32,Cloning,LocalThread>::new();
 
     a.listen(|num| {
         k.set(num);

@@ -1,6 +1,6 @@
 [package]
 edition = "2018"
-name = "core2"
+name = "event-me"
 version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,6 +8,8 @@ version = "0.1.0"
 [dependencies]
 lazy_static = {version = "*", optional = true}
 threadpool = {version = "1.0", optional = true}
+#tokio = {version = "1", features = ["rt-multi-thread"], optional = true}
 
 [features]
 thread-pool = ["threadpool", "lazy_static"]
+#tokio-rt = ["tokio", "lazy_static"]
